@@ -1,0 +1,12 @@
+using System.Net.Http.Headers;using System.Text;using System.Text.Json;using System.Text.RegularExpressions;using FreightLook.Api.Models;
+namespace FreightLook.Api.Services;
+public sealed class NaturalLanguageService(HttpClient http,IConfiguration cfg)
+{
+ public async Task<ParsedQuery> ParseAsync(string query,CancellationToken ct){if(string.IsNullOrWhiteSpace(query))throw new ArgumentException("Query is required.");var origin=Regex.Match(query,@"from\s+([A-Z]{3})",RegexOptions.IgnoreCase).Groups[1].Value;var dest=Regex.Match(query,@"to\s+([A-Z]{3})",RegexOptions.IgnoreCase).Groups[1].Value;var weight=Regex.Match(query,@"(\d+(?:\.\d+)?)\s*(?:kg|kgs|kilograms?)",RegexOptions.IgnoreCase);decimal? kg=decimal.TryParse(weight.Groups[1].Value,out var n)?n:null;
+ // Optional OpenAI-compatible endpoint; deterministic parser remains available without credentials.
+ var baseUrl=cfg["Ai:BaseUrl"];var key=cfg["Ai:ApiKey"];var model=cfg["Ai:Model"];if(!string.IsNullOrWhiteSpace(baseUrl)&&!string.IsNullOrWhiteSpace(key)&&!string.IsNullOrWhiteSpace(model)){try{var payload=new{model,messages=new object[]{new{role="system",content="Extract only origin and destination IATA codes (3 letters), weightKg (number or null), serviceType (string or null). Return JSON only. Do not invent values. Schema: {origin,destination,weightKg,serviceType}."},new{role="user",content=query}},temperature=0};using var req=new HttpRequestMessage(HttpMethod.Post,baseUrl.TrimEnd('/')+"/chat/completions");req.Headers.Authorization=new AuthenticationHeaderValue("Bearer",key);req.Content=new StringContent(JsonSerializer.Serialize(payload),Encoding.UTF8,"application/json");using var res=await http.SendAsync(req,ct);res.EnsureSuccessStatusCode();using var doc=JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));var content=doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString()??"{}";var parsed=JsonSerializer.Deserialize<AiParsed>(content,new JsonSerializerOptions{PropertyNameCaseInsensitive=true});if(parsed is not null)return new(Clean(parsed.Origin),Clean(parsed.Destination),parsed.WeightKg,parsed.ServiceType); }catch{/* Safe deterministic fallback. */}}
+ return new(Clean(origin),Clean(dest),kg,null);
+ }
+ private static string? Clean(string? s)=>s is {Length:3}&&s.All(char.IsLetter)?s.ToUpperInvariant():null;
+ private sealed record AiParsed(string? Origin,string? Destination,decimal? WeightKg,string? ServiceType);
+}
